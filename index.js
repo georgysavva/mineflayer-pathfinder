@@ -11,7 +11,7 @@ const Vec3 = require('vec3').Vec3
 const Physics = require('./lib/physics')
 const nbt = require('prismarine-nbt')
 const interactableBlocks = require('./lib/interactable.json')
-const LOOK_SPEED = 0.04;
+const LOOK_SPEED = 0.08;
 function inject (bot) {
   const waterType = bot.registry.blocksByName.water.id
   const ladderId = bot.registry.blocksByName.ladder.id
