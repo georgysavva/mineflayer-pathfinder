@@ -127,22 +127,6 @@ function inject(bot) {
     }
   }
 
-  const lookSmoother = new YawPitchSmoother(bot, {
-    maxYawSpeed: deg(90), // <- tune these to make it slower/faster
-    maxPitchSpeed: deg(45),
-    epsilonYaw: deg(0.2),
-    epsilonPitch: deg(0.2),
-  });
-
-  // Run the smoother every physics tick
-  bot.on("physicsTick", () => lookSmoother.tick());
-
-  // Expose knobs so you can tweak at runtime
-  bot.pathfinder.lookSmoother = lookSmoother;
-  bot.pathfinder.setLookSmoothing = ({ maxYawDeg, maxPitchDeg } = {}) => {
-    if (maxYawDeg != null) lookSmoother.maxYawSpeed = deg(maxYawDeg);
-    if (maxPitchDeg != null) lookSmoother.maxPitchSpeed = deg(maxPitchDeg);
-  };
   const waterType = bot.registry.blocksByName.water.id;
   const ladderId = bot.registry.blocksByName.ladder.id;
   const vineId = bot.registry.blocksByName.vine.id;
@@ -165,6 +149,22 @@ function inject(bot) {
   const lockUseBlock = new Lock();
 
   bot.pathfinder = {};
+  const lookSmoother = new YawPitchSmoother(bot, {
+    maxYawSpeed: deg(90), // <- tune these to make it slower/faster
+    maxPitchSpeed: deg(45),
+    epsilonYaw: deg(0.2),
+    epsilonPitch: deg(0.2),
+  });
+
+  // Run the smoother every physics tick
+  bot.on("physicsTick", () => lookSmoother.tick());
+
+  // Expose knobs so you can tweak at runtime
+  bot.pathfinder.lookSmoother = lookSmoother;
+  bot.pathfinder.setLookSmoothing = ({ maxYawDeg, maxPitchDeg } = {}) => {
+    if (maxYawDeg != null) lookSmoother.maxYawSpeed = deg(maxYawDeg);
+    if (maxPitchDeg != null) lookSmoother.maxPitchSpeed = deg(maxPitchDeg);
+  };
 
   bot.pathfinder.thinkTimeout = 5000; // ms
   bot.pathfinder.tickTimeout = 40; // ms, amount of thinking per tick (max 50 ms)
