@@ -371,11 +371,13 @@ function inject (bot) {
         refBlock.clone().offset(edge.x + 0.5, 1, edge.z + 0.5)
       ) > 0.4
     ) {
+      const lookStart = performance.now();
       await bot.lookAtSmooth(
         bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z),
         LOOK_SPEED,
         allowInstantTurn
       );
+      console.log(`[lookAtSmooth] moveToEdge (scaffolding positioning) took ${(performance.now() - lookStart).toFixed(1)}ms`);
       bot.setControlState("sneak", true);
       bot.setControlState("back", true);
       return false;
@@ -389,7 +391,9 @@ function inject (bot) {
     const minDistanceSq = 0.2 * 0.2
     const targetPos = pos.clone().offset(0.5, 0, 0.5)
     if (bot.entity.position.distanceSquared(targetPos) > minDistanceSq) {
+      const lookStart = performance.now();
       await bot.lookAtSmooth(targetPos, LOOK_SPEED);
+      console.log(`[lookAtSmooth] moveToBlock (precise positioning) took ${(performance.now() - lookStart).toFixed(1)}ms`);
       bot.setControlState('forward', true)
       return false
     }
@@ -431,7 +435,9 @@ function inject (bot) {
     if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
       const target = stateGoal.entity
       if (physics.canStraightLine([target.position])) {
+        const lookStart = performance.now();
         await bot.lookAtSmooth(target.position.offset(0, 1.6, 0), LOOK_SPEED);
+        console.log(`[lookAtSmooth] monitorMovement (entity following) took ${(performance.now() - lookStart).toFixed(1)}ms`);
 
         if (target.position.distanceSquared(bot.entity.position) > stateGoal.rangeSq) {
           bot.setControlState('forward', true)
@@ -614,7 +620,9 @@ function inject (bot) {
       dz = nextPoint.z - p.z
     }
 
+    const lookStart = performance.now();
     await bot.lookSmooth(Math.atan2(-dx, -dz), 0, LOOK_SPEED);
+    console.log(`[lookSmooth] movement direction took ${(performance.now() - lookStart).toFixed(1)}ms`);
     bot.setControlState('forward', true)
     bot.setControlState('jump', false)
 
