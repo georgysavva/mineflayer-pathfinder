@@ -163,7 +163,9 @@ function inject (bot) {
     stopPathing = true
   }
 
-  bot.on('physicsTick', monitorMovement)
+  bot.on('physicsTick', () => {
+    monitorMovement().catch(console.error)
+  })
 
   function postProcessPath (path) {
     for (let i = 0; i < path.length; i++) {
@@ -344,7 +346,7 @@ function inject (bot) {
     if (Math.abs(bot.entity.position.z - blockZ) > 0.2) { bot.entity.position.z = blockZ }
   }
 
-  function moveToEdge (refBlock, edge) {
+  async function moveToEdge (refBlock, edge) {
     // If allowed turn instantly should maybe be a bot option
     const allowInstantTurn = false
     function getViewVector(pitch, yaw) {
@@ -369,7 +371,7 @@ function inject (bot) {
         refBlock.clone().offset(edge.x + 0.5, 1, edge.z + 0.5)
       ) > 0.4
     ) {
-      bot.lookAtSmooth(
+      await bot.lookAtSmooth(
         bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z),
         LOOK_SPEED,
         allowInstantTurn
@@ -382,12 +384,12 @@ function inject (bot) {
     return true
   }
 
-  function moveToBlock (pos) {
+  async function moveToBlock (pos) {
     // minDistanceSq = Min distance sqrt to the target pos were the bot is centered enough to place blocks around him
     const minDistanceSq = 0.2 * 0.2
     const targetPos = pos.clone().offset(0.5, 0, 0.5)
     if (bot.entity.position.distanceSquared(targetPos) > minDistanceSq) {
-      bot.lookAtSmooth(targetPos, LOOK_SPEED);
+      await bot.lookAtSmooth(targetPos, LOOK_SPEED);
       bot.setControlState('forward', true)
       return false
     }
@@ -424,12 +426,12 @@ function inject (bot) {
     }
   })
 
-  function monitorMovement () {
+  async function monitorMovement () {
     // Test freemotion
     if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
       const target = stateGoal.entity
       if (physics.canStraightLine([target.position])) {
-        bot.lookAtSmooth(target.position.offset(0, 1.6, 0), LOOK_SPEED);
+        await bot.lookAtSmooth(target.position.offset(0, 1.6, 0), LOOK_SPEED);
 
         if (target.position.distanceSquared(bot.entity.position) > stateGoal.rangeSq) {
           bot.setControlState('forward', true)
@@ -457,7 +459,7 @@ function inject (bot) {
     }
 
     if (bot.pathfinder.LOSWhenPlacingBlocks && returningPos) {
-      if (!moveToBlock(returningPos)) return
+      if (!(await moveToBlock(returningPos))) return
       returningPos = null
     }
 
@@ -544,7 +546,7 @@ function inject (bot) {
         return
       }
       if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.y === bot.entity.position.floored().y - 1 && placingBlock.dy === 0) {
-        if (!moveToEdge(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), new Vec3(placingBlock.dx, 0, placingBlock.dz))) return
+        if (!(await moveToEdge(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), new Vec3(placingBlock.dx, 0, placingBlock.dz)))) return
       }
       let canPlace = true
       if (placingBlock.jump) {
@@ -612,7 +614,7 @@ function inject (bot) {
       dz = nextPoint.z - p.z
     }
 
-    bot.lookSmooth(Math.atan2(-dx, -dz), 0, LOOK_SPEED);
+    await bot.lookSmooth(Math.atan2(-dx, -dz), 0, LOOK_SPEED);
     bot.setControlState('forward', true)
     bot.setControlState('jump', false)
 
