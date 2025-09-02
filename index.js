@@ -36,8 +36,8 @@ function inject(bot) {
       this.maxPitchSpeed = opts.maxPitchSpeed ?? deg(120); // rad/s
       this.epsilonYaw = opts.epsilonYaw ?? deg(0.25);
       this.epsilonPitch = opts.epsilonPitch ?? deg(0.25);
-      this.targetYaw = bot.entity.yaw || 0;
-      this.targetPitch = bot.entity.pitch || 0;
+      this.targetYaw = 0;
+      this.targetPitch = 0;
       this.customYawSpeed = null;
       this.customPitchSpeed = null;
       this.active = false;
