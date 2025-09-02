@@ -370,8 +370,9 @@ function inject (bot) {
       ) > 0.4
     ) {
       const lookStart = performance.now();
-      bot.lookAt(
+      bot.lookAtSmooth(
         bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z),
+        LOOK_SPEED,
         allowInstantTurn
       );
       console.log(
@@ -393,7 +394,7 @@ function inject (bot) {
     const targetPos = pos.clone().offset(0.5, 0, 0.5);
     if (bot.entity.position.distanceSquared(targetPos) > minDistanceSq) {
       const lookStart = performance.now();
-      bot.lookAt(targetPos);
+      bot.lookAtSmooth(targetPos, LOOK_SPEED);
       console.log(
         `[lookAtSmooth] moveToBlock (precise positioning) took ${(
           performance.now() - lookStart
@@ -451,7 +452,7 @@ function inject (bot) {
       const target = stateGoal.entity;
       if (physics.canStraightLine([target.position])) {
         const lookStart = performance.now();
-        bot.lookAt(target.position.offset(0, 1.6, 0));
+        bot.lookAtSmooth(target.position.offset(0, 1.6, 0), LOOK_SPEED);
         console.log(
           `[lookAtSmooth] monitorMovement (entity following) took ${(
             performance.now() - lookStart
@@ -682,7 +683,7 @@ function inject (bot) {
     }
 
     const lookStart = performance.now();
-    bot.look(Math.atan2(-dx, -dz), 0);
+    bot.lookSmooth(Math.atan2(-dx, -dz), 0, LOOK_SPEED);
     console.log(
       `[lookSmooth] movement direction took ${(
         performance.now() - lookStart
