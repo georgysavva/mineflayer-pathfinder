@@ -10,253 +10,444 @@ const Vec3 = require('vec3').Vec3
 
 const Physics = require('./lib/physics')
 const nbt = require('prismarine-nbt')
-const interactableBlocks = require('./lib/interactable.json')
-const LOOK_SPEED = 0.08;
-function inject (bot) {
-  const waterType = bot.registry.blocksByName.water.id
-  const ladderId = bot.registry.blocksByName.ladder.id
-  const vineId = bot.registry.blocksByName.vine.id
-  let stateMovements = new Movements(bot)
-  let stateGoal = null
-  let astarContext = null
-  let astartTimedout = false
-  let dynamicGoal = false
-  let path = []
-  let pathUpdated = false
-  let digging = false
-  let placing = false
-  let placingBlock = null
-  let lastNodeTime = performance.now()
-  let returningPos = null
-  let stopPathing = false
-  const physics = new Physics(bot)
-  const lockPlaceBlock = new Lock()
-  const lockEquipItem = new Lock()
-  const lockUseBlock = new Lock()
+const interactableBlocks = require("./lib/interactable.json");
+function inject(bot) {
+  // ---- Smooth, constant-speed head controller ----
+  function deg(x) {
+    return (x * Math.PI) / 180;
+  }
+  function clamp(x, lo, hi) {
+    return Math.max(lo, Math.min(hi, x));
+  }
+  function normAngle(a) {
+    // Normalize to [-PI, PI)
+    a = (a + Math.PI) % (2 * Math.PI);
+    if (a < 0) a += 2 * Math.PI;
+    return a - Math.PI;
+  }
+  function shortestDiff(target, current) {
+    return normAngle(target - current);
+  }
 
-  bot.pathfinder = {}
+  class YawPitchSmoother {
+    constructor(bot, opts = {}) {
+      this.bot = bot;
+      this.maxYawSpeed = opts.maxYawSpeed ?? deg(180); // rad/s
+      this.maxPitchSpeed = opts.maxPitchSpeed ?? deg(120); // rad/s
+      this.epsilonYaw = opts.epsilonYaw ?? deg(0.25);
+      this.epsilonPitch = opts.epsilonPitch ?? deg(0.25);
+      this.targetYaw = bot.entity.yaw || 0;
+      this.targetPitch = bot.entity.pitch || 0;
+      this.customYawSpeed = null;
+      this.customPitchSpeed = null;
+      this.active = false;
+      this._lastT = performance.now();
+    }
 
-  bot.pathfinder.thinkTimeout = 5000 // ms
-  bot.pathfinder.tickTimeout = 40 // ms, amount of thinking per tick (max 50 ms)
-  bot.pathfinder.searchRadius = -1 // in blocks, limits of the search area, -1: don't limit the search
-  bot.pathfinder.enablePathShortcut = false // disabled by default as it can cause bugs in specific configurations
-  bot.pathfinder.LOSWhenPlacingBlocks = true
+    // Set a new target (optionally stretched over durationMs)
+    setTargetYawPitch(yaw, pitch, durationMs = null) {
+      yaw = normAngle(yaw);
+      pitch = clamp(pitch, -Math.PI / 2, Math.PI / 2);
+      this.targetYaw = yaw;
+      this.targetPitch = pitch;
+      if (durationMs && durationMs > 0) {
+        const curY = this.bot.entity.yaw;
+        const curP = this.bot.entity.pitch;
+        const yawDist = Math.abs(shortestDiff(yaw, curY));
+        const pitchDist = Math.abs(pitch - curP);
+        this.customYawSpeed = yawDist / (durationMs / 1000);
+        this.customPitchSpeed = pitchDist / (durationMs / 1000);
+      } else {
+        this.customYawSpeed = null;
+        this.customPitchSpeed = null;
+      }
+      this.active = true;
+    }
+
+    lookAt(pos, durationMs = null) {
+      const head = this.bot.entity.position.offset(
+        0,
+        this.bot.entity.height ?? 1.62,
+        0
+      );
+      const dx = pos.x - head.x;
+      const dy = pos.y - head.y;
+      const dz = pos.z - head.z;
+      const yaw = Math.atan2(-dx, -dz);
+      const pitch = Math.atan2(dy, Math.hypot(dx, dz));
+      this.setTargetYawPitch(yaw, pitch, durationMs);
+    }
+
+    cancel() {
+      this.active = false;
+      this.customYawSpeed = null;
+      this.customPitchSpeed = null;
+    }
+
+    tick() {
+      // Called every physicsTick
+      const now = performance.now();
+      let dt = (now - this._lastT) / 1000;
+      this._lastT = now;
+      if (dt <= 0) dt = 0.05;
+
+      if (!this.active) return;
+
+      const bot = this.bot;
+      const curYaw = bot.entity.yaw;
+      const curPitch = bot.entity.pitch;
+
+      const yawDiff = shortestDiff(this.targetYaw, curYaw);
+      const pitchDiff = this.targetPitch - curPitch;
+
+      const yawDone = Math.abs(yawDiff) <= this.epsilonYaw;
+      const pitchDone = Math.abs(pitchDiff) <= this.epsilonPitch;
+
+      if (yawDone && pitchDone) {
+        bot.look(this.targetYaw, this.targetPitch, true);
+        this.cancel();
+        return;
+      }
+
+      const yawSpeed = this.customYawSpeed ?? this.maxYawSpeed;
+      const pitchSpeed = this.customPitchSpeed ?? this.maxPitchSpeed;
+
+      const yawStep = clamp(yawDiff, -yawSpeed * dt, yawSpeed * dt);
+      const pitchStep = clamp(pitchDiff, -pitchSpeed * dt, pitchSpeed * dt);
+
+      const newYaw = normAngle(curYaw + (yawDone ? 0 : yawStep));
+      const newPitch = clamp(
+        curPitch + (pitchDone ? 0 : pitchStep),
+        -Math.PI / 2,
+        Math.PI / 2
+      );
+
+      // Force = true so we author the incremental rotation this tick
+      bot.look(newYaw, newPitch, true);
+    }
+  }
+
+  const lookSmoother = new YawPitchSmoother(bot, {
+    maxYawSpeed: deg(90), // <- tune these to make it slower/faster
+    maxPitchSpeed: deg(45),
+    epsilonYaw: deg(0.2),
+    epsilonPitch: deg(0.2),
+  });
+
+  // Run the smoother every physics tick
+  bot.on("physicsTick", () => lookSmoother.tick());
+
+  // Expose knobs so you can tweak at runtime
+  bot.pathfinder.lookSmoother = lookSmoother;
+  bot.pathfinder.setLookSmoothing = ({ maxYawDeg, maxPitchDeg } = {}) => {
+    if (maxYawDeg != null) lookSmoother.maxYawSpeed = deg(maxYawDeg);
+    if (maxPitchDeg != null) lookSmoother.maxPitchSpeed = deg(maxPitchDeg);
+  };
+  const waterType = bot.registry.blocksByName.water.id;
+  const ladderId = bot.registry.blocksByName.ladder.id;
+  const vineId = bot.registry.blocksByName.vine.id;
+  let stateMovements = new Movements(bot);
+  let stateGoal = null;
+  let astarContext = null;
+  let astartTimedout = false;
+  let dynamicGoal = false;
+  let path = [];
+  let pathUpdated = false;
+  let digging = false;
+  let placing = false;
+  let placingBlock = null;
+  let lastNodeTime = performance.now();
+  let returningPos = null;
+  let stopPathing = false;
+  const physics = new Physics(bot);
+  const lockPlaceBlock = new Lock();
+  const lockEquipItem = new Lock();
+  const lockUseBlock = new Lock();
+
+  bot.pathfinder = {};
+
+  bot.pathfinder.thinkTimeout = 5000; // ms
+  bot.pathfinder.tickTimeout = 40; // ms, amount of thinking per tick (max 50 ms)
+  bot.pathfinder.searchRadius = -1; // in blocks, limits of the search area, -1: don't limit the search
+  bot.pathfinder.enablePathShortcut = false; // disabled by default as it can cause bugs in specific configurations
+  bot.pathfinder.LOSWhenPlacingBlocks = true;
 
   bot.pathfinder.bestHarvestTool = (block) => {
-    const availableTools = bot.inventory.items()
-    const effects = bot.entity.effects
+    const availableTools = bot.inventory.items();
+    const effects = bot.entity.effects;
 
-    let fastest = Number.MAX_VALUE
-    let bestTool = null
+    let fastest = Number.MAX_VALUE;
+    let bestTool = null;
     for (const tool of availableTools) {
-      const enchants = (tool && tool.nbt) ? nbt.simplify(tool.nbt).Enchantments : []
-      const digTime = block.digTime(tool ? tool.type : null, false, false, false, enchants, effects)
+      const enchants =
+        tool && tool.nbt ? nbt.simplify(tool.nbt).Enchantments : [];
+      const digTime = block.digTime(
+        tool ? tool.type : null,
+        false,
+        false,
+        false,
+        enchants,
+        effects
+      );
       if (digTime < fastest) {
-        fastest = digTime
-        bestTool = tool
+        fastest = digTime;
+        bestTool = tool;
       }
     }
 
-    return bestTool
-  }
+    return bestTool;
+  };
 
   bot.pathfinder.getPathTo = (movements, goal, timeout) => {
-    const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, { timeout })
-    const { value: { result, astarContext: context } } = generator.next()
-    astarContext = context
-    return result
-  }
+    const generator = bot.pathfinder.getPathFromTo(
+      movements,
+      bot.entity.position,
+      goal,
+      { timeout }
+    );
+    const {
+      value: { result, astarContext: context },
+    } = generator.next();
+    astarContext = context;
+    return result;
+  };
 
-  bot.pathfinder.getPathFromTo = function * (movements, startPos, goal, options = {}) {
-    const optimizePath = options.optimizePath ?? true
-    const resetEntityIntersects = options.resetEntityIntersects ?? true
-    const timeout = options.timeout ?? bot.pathfinder.thinkTimeout
-    const tickTimeout = options.tickTimeout ?? bot.pathfinder.tickTimeout
-    const searchRadius = options.searchRadius ?? bot.pathfinder.searchRadius
-    let start
+  bot.pathfinder.getPathFromTo = function* (
+    movements,
+    startPos,
+    goal,
+    options = {}
+  ) {
+    const optimizePath = options.optimizePath ?? true;
+    const resetEntityIntersects = options.resetEntityIntersects ?? true;
+    const timeout = options.timeout ?? bot.pathfinder.thinkTimeout;
+    const tickTimeout = options.tickTimeout ?? bot.pathfinder.tickTimeout;
+    const searchRadius = options.searchRadius ?? bot.pathfinder.searchRadius;
+    let start;
     if (options.startMove) {
-      start = options.startMove
+      start = options.startMove;
     } else {
-      const p = startPos.floored()
-      const dy = startPos.y - p.y
-      const b = bot.blockAt(p) // The block we are standing in
+      const p = startPos.floored();
+      const dy = startPos.y - p.y;
+      const b = bot.blockAt(p); // The block we are standing in
       // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
-      const offset = (b && dy > 0.001 && bot.entity.onGround && !stateMovements.emptyBlocks.has(b.type)) ? 1 : 0
-      start = new Move(p.x, p.y + offset, p.z, movements.countScaffoldingItems(), 0)
+      const offset =
+        b &&
+        dy > 0.001 &&
+        bot.entity.onGround &&
+        !stateMovements.emptyBlocks.has(b.type)
+          ? 1
+          : 0;
+      start = new Move(
+        p.x,
+        p.y + offset,
+        p.z,
+        movements.countScaffoldingItems(),
+        0
+      );
     }
     if (movements.allowEntityDetection) {
       if (resetEntityIntersects) {
-        movements.clearCollisionIndex()
+        movements.clearCollisionIndex();
       }
-      movements.updateCollisionIndex()
+      movements.updateCollisionIndex();
     }
-    const astarContext = new AStar(start, movements, goal, timeout, tickTimeout, searchRadius)
-    let result = astarContext.compute()
-    if (optimizePath) result.path = postProcessPath(result.path)
-    yield { result, astarContext }
-    while (result.status === 'partial') {
-      result = astarContext.compute()
-      if (optimizePath) result.path = postProcessPath(result.path)
-      yield { result, astarContext }
+    const astarContext = new AStar(
+      start,
+      movements,
+      goal,
+      timeout,
+      tickTimeout,
+      searchRadius
+    );
+    let result = astarContext.compute();
+    if (optimizePath) result.path = postProcessPath(result.path);
+    yield { result, astarContext };
+    while (result.status === "partial") {
+      result = astarContext.compute();
+      if (optimizePath) result.path = postProcessPath(result.path);
+      yield { result, astarContext };
     }
-  }
+  };
 
   Object.defineProperties(bot.pathfinder, {
     goal: {
-      get () {
-        return stateGoal
-      }
+      get() {
+        return stateGoal;
+      },
     },
     movements: {
-      get () {
-        return stateMovements
-      }
-    }
-  })
+      get() {
+        return stateMovements;
+      },
+    },
+  });
 
-  function detectDiggingStopped () {
-    digging = false
-    bot.removeAllListeners('diggingAborted', detectDiggingStopped)
-    bot.removeAllListeners('diggingCompleted', detectDiggingStopped)
+  function detectDiggingStopped() {
+    digging = false;
+    bot.removeAllListeners("diggingAborted", detectDiggingStopped);
+    bot.removeAllListeners("diggingCompleted", detectDiggingStopped);
   }
 
-  function resetPath (reason, clearStates = true) {
-    if (!stopPathing && path.length > 0) bot.emit('path_reset', reason)
-    path = []
+  function resetPath(reason, clearStates = true) {
+    if (!stopPathing && path.length > 0) bot.emit("path_reset", reason);
+    path = [];
     if (digging) {
-      bot.on('diggingAborted', detectDiggingStopped)
-      bot.on('diggingCompleted', detectDiggingStopped)
-      bot.stopDigging()
+      bot.on("diggingAborted", detectDiggingStopped);
+      bot.on("diggingCompleted", detectDiggingStopped);
+      bot.stopDigging();
     }
-    placing = false
-    pathUpdated = false
-    astarContext = null
-    lockEquipItem.release()
-    lockPlaceBlock.release()
-    lockUseBlock.release()
-    stateMovements.clearCollisionIndex()
-    if (clearStates) bot.clearControlStates()
-    if (stopPathing) return stop()
+    placing = false;
+    pathUpdated = false;
+    astarContext = null;
+    lockEquipItem.release();
+    lockPlaceBlock.release();
+    lockUseBlock.release();
+    stateMovements.clearCollisionIndex();
+    if (clearStates) bot.clearControlStates();
+    if (stopPathing) return stop();
   }
 
   bot.pathfinder.setGoal = (goal, dynamic = false) => {
-    stateGoal = goal
-    dynamicGoal = dynamic
-    bot.emit('goal_updated', goal, dynamic)
-    resetPath('goal_updated')
-  }
+    stateGoal = goal;
+    dynamicGoal = dynamic;
+    bot.emit("goal_updated", goal, dynamic);
+    resetPath("goal_updated");
+  };
 
   bot.pathfinder.setMovements = (movements) => {
-    stateMovements = movements
-    resetPath('movements_updated')
-  }
+    stateMovements = movements;
+    resetPath("movements_updated");
+  };
 
-  bot.pathfinder.isMoving = () => path.length > 0
-  bot.pathfinder.isMining = () => digging
-  bot.pathfinder.isBuilding = () => placing
+  bot.pathfinder.isMoving = () => path.length > 0;
+  bot.pathfinder.isMining = () => digging;
+  bot.pathfinder.isBuilding = () => placing;
 
   bot.pathfinder.goto = (goal) => {
-    return gotoUtil(bot, goal)
-  }
+    return gotoUtil(bot, goal);
+  };
 
   bot.pathfinder.stop = () => {
-    stopPathing = true
-  }
+    stopPathing = true;
+  };
 
   bot.on("physicsTick", monitorMovement);
 
-  function postProcessPath (path) {
+  function postProcessPath(path) {
     for (let i = 0; i < path.length; i++) {
-      const curPoint = path[i]
-      if (curPoint.toBreak.length > 0 || curPoint.toPlace.length > 0) break
-      const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
-      if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
-        curPoint.x = Math.floor(curPoint.x) + 0.5
-        curPoint.y = Math.floor(curPoint.y)
-        curPoint.z = Math.floor(curPoint.z) + 0.5
-        continue
+      const curPoint = path[i];
+      if (curPoint.toBreak.length > 0 || curPoint.toPlace.length > 0) break;
+      const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z));
+      if (
+        b &&
+        (b.type === waterType ||
+          ((b.type === ladderId || b.type === vineId) &&
+            i + 1 < path.length &&
+            path[i + 1].y < curPoint.y))
+      ) {
+        curPoint.x = Math.floor(curPoint.x) + 0.5;
+        curPoint.y = Math.floor(curPoint.y);
+        curPoint.z = Math.floor(curPoint.z) + 0.5;
+        continue;
       }
-      let np = getPositionOnTopOf(b)
-      if (np === null) np = getPositionOnTopOf(bot.blockAt(new Vec3(curPoint.x, curPoint.y - 1, curPoint.z)))
+      let np = getPositionOnTopOf(b);
+      if (np === null)
+        np = getPositionOnTopOf(
+          bot.blockAt(new Vec3(curPoint.x, curPoint.y - 1, curPoint.z))
+        );
       if (np) {
-        curPoint.x = np.x
-        curPoint.y = np.y
-        curPoint.z = np.z
+        curPoint.x = np.x;
+        curPoint.y = np.y;
+        curPoint.z = np.z;
       } else {
-        curPoint.x = Math.floor(curPoint.x) + 0.5
-        curPoint.y = curPoint.y - 1
-        curPoint.z = Math.floor(curPoint.z) + 0.5
+        curPoint.x = Math.floor(curPoint.x) + 0.5;
+        curPoint.y = curPoint.y - 1;
+        curPoint.z = Math.floor(curPoint.z) + 0.5;
       }
     }
 
-    if (!bot.pathfinder.enablePathShortcut || stateMovements.exclusionAreasStep.length !== 0 || path.length === 0) return path
+    if (
+      !bot.pathfinder.enablePathShortcut ||
+      stateMovements.exclusionAreasStep.length !== 0 ||
+      path.length === 0
+    )
+      return path;
 
-    const newPath = []
-    let lastNode = bot.entity.position
+    const newPath = [];
+    let lastNode = bot.entity.position;
     for (let i = 1; i < path.length; i++) {
-      const node = path[i]
-      if (Math.abs(node.y - lastNode.y) > 0.5 || node.toBreak.length > 0 || node.toPlace.length > 0 || !physics.canStraightLineBetween(lastNode, node)) {
-        newPath.push(path[i - 1])
-        lastNode = path[i - 1]
+      const node = path[i];
+      if (
+        Math.abs(node.y - lastNode.y) > 0.5 ||
+        node.toBreak.length > 0 ||
+        node.toPlace.length > 0 ||
+        !physics.canStraightLineBetween(lastNode, node)
+      ) {
+        newPath.push(path[i - 1]);
+        lastNode = path[i - 1];
       }
     }
-    newPath.push(path[path.length - 1])
-    return newPath
+    newPath.push(path[path.length - 1]);
+    return newPath;
   }
 
-  function pathFromPlayer (path) {
-    if (path.length === 0) return
-    let minI = 0
-    let minDistance = 1000
+  function pathFromPlayer(path) {
+    if (path.length === 0) return;
+    let minI = 0;
+    let minDistance = 1000;
     for (let i = 0; i < path.length; i++) {
-      const node = path[i]
-      if (node.toBreak.length !== 0 || node.toPlace.length !== 0) break
-      const dist = bot.entity.position.distanceSquared(node)
+      const node = path[i];
+      if (node.toBreak.length !== 0 || node.toPlace.length !== 0) break;
+      const dist = bot.entity.position.distanceSquared(node);
       if (dist < minDistance) {
-        minDistance = dist
-        minI = i
+        minDistance = dist;
+        minI = i;
       }
     }
     // check if we are between 2 nodes
-    const n1 = path[minI]
+    const n1 = path[minI];
     // check if node already reached
-    const dx = n1.x - bot.entity.position.x
-    const dy = n1.y - bot.entity.position.y
-    const dz = n1.z - bot.entity.position.z
-    const reached = Math.abs(dx) <= 0.35 && Math.abs(dz) <= 0.35 && Math.abs(dy) < 1
-    if (minI + 1 < path.length && n1.toBreak.length === 0 && n1.toPlace.length === 0) {
-      const n2 = path[minI + 1]
-      const d2 = bot.entity.position.distanceSquared(n2)
-      const d12 = n1.distanceSquared(n2)
-      minI += d12 > d2 || reached ? 1 : 0
+    const dx = n1.x - bot.entity.position.x;
+    const dy = n1.y - bot.entity.position.y;
+    const dz = n1.z - bot.entity.position.z;
+    const reached =
+      Math.abs(dx) <= 0.35 && Math.abs(dz) <= 0.35 && Math.abs(dy) < 1;
+    if (
+      minI + 1 < path.length &&
+      n1.toBreak.length === 0 &&
+      n1.toPlace.length === 0
+    ) {
+      const n2 = path[minI + 1];
+      const d2 = bot.entity.position.distanceSquared(n2);
+      const d12 = n1.distanceSquared(n2);
+      minI += d12 > d2 || reached ? 1 : 0;
     }
 
-    path.splice(0, minI)
+    path.splice(0, minI);
   }
 
-  function isPositionNearPath (pos, path) {
-    let prevNode = null
+  function isPositionNearPath(pos, path) {
+    let prevNode = null;
     for (const node of path) {
-      let comparisonPoint = null
+      let comparisonPoint = null;
       if (
         prevNode === null ||
-        (
-          Math.abs(prevNode.x - node.x) <= 2 &&
+        (Math.abs(prevNode.x - node.x) <= 2 &&
           Math.abs(prevNode.y - node.y) <= 2 &&
-          Math.abs(prevNode.z - node.z) <= 2
-        )
+          Math.abs(prevNode.z - node.z) <= 2)
       ) {
         // Unoptimized path, or close enough to last point
         // to just check against the current point
-        comparisonPoint = node
+        comparisonPoint = node;
       } else {
         // Optimized path - the points are far enough apart
         //   that we need to check the space between them too
 
         // First, a quick check - if point it outside the path
         // segment's AABB, then it isn't near.
-        const minBound = prevNode.min(node)
-        const maxBound = prevNode.max(node)
+        const minBound = prevNode.min(node);
+        const maxBound = prevNode.max(node);
         if (
           pos.x - 0.5 < minBound.x - 1 ||
           pos.x - 0.5 > maxBound.x + 1 ||
@@ -265,83 +456,89 @@ function inject (bot) {
           pos.z - 0.5 < minBound.z - 1 ||
           pos.z - 0.5 > maxBound.z + 1
         ) {
-          continue
+          continue;
         }
 
-        comparisonPoint = closestPointOnLineSegment(pos, prevNode, node)
+        comparisonPoint = closestPointOnLineSegment(pos, prevNode, node);
       }
 
-      const dx = Math.abs(comparisonPoint.x - pos.x - 0.5)
-      const dy = Math.abs(comparisonPoint.y - pos.y - 0.5)
-      const dz = Math.abs(comparisonPoint.z - pos.z - 0.5)
-      if (dx <= 1 && dy <= 2 && dz <= 1) return true
+      const dx = Math.abs(comparisonPoint.x - pos.x - 0.5);
+      const dy = Math.abs(comparisonPoint.y - pos.y - 0.5);
+      const dz = Math.abs(comparisonPoint.z - pos.z - 0.5);
+      if (dx <= 1 && dy <= 2 && dz <= 1) return true;
 
-      prevNode = node
+      prevNode = node;
     }
 
-    return false
+    return false;
   }
 
-  function closestPointOnLineSegment (point, segmentStart, segmentEnd) {
-    const segmentLength = segmentEnd.minus(segmentStart).norm()
+  function closestPointOnLineSegment(point, segmentStart, segmentEnd) {
+    const segmentLength = segmentEnd.minus(segmentStart).norm();
 
     if (segmentLength === 0) {
-      return segmentStart
+      return segmentStart;
     }
 
     // t is like an interpolation from segmentStart to segmentEnd
     //  for the closest point on the line
-    let t = (point.minus(segmentStart)).dot(segmentEnd.minus(segmentStart)) / segmentLength
+    let t =
+      point.minus(segmentStart).dot(segmentEnd.minus(segmentStart)) /
+      segmentLength;
 
     // bound t to be on the segment
-    t = Math.max(0, Math.min(1, t))
+    t = Math.max(0, Math.min(1, t));
 
-    return segmentStart.plus(segmentEnd.minus(segmentStart).scaled(t))
+    return segmentStart.plus(segmentEnd.minus(segmentStart).scaled(t));
   }
 
   // Return the average x/z position of the highest standing positions
   // in the block.
-  function getPositionOnTopOf (block) {
-    if (!block || block.shapes.length === 0) return null
-    const p = new Vec3(0.5, 0, 0.5)
-    let n = 1
+  function getPositionOnTopOf(block) {
+    if (!block || block.shapes.length === 0) return null;
+    const p = new Vec3(0.5, 0, 0.5);
+    let n = 1;
     for (const shape of block.shapes) {
-      const h = shape[4]
+      const h = shape[4];
       if (h === p.y) {
-        p.x += (shape[0] + shape[3]) / 2
-        p.z += (shape[2] + shape[5]) / 2
-        n++
+        p.x += (shape[0] + shape[3]) / 2;
+        p.z += (shape[2] + shape[5]) / 2;
+        n++;
       } else if (h > p.y) {
-        n = 2
-        p.x = 0.5 + (shape[0] + shape[3]) / 2
-        p.y = h
-        p.z = 0.5 + (shape[2] + shape[5]) / 2
+        n = 2;
+        p.x = 0.5 + (shape[0] + shape[3]) / 2;
+        p.y = h;
+        p.z = 0.5 + (shape[2] + shape[5]) / 2;
       }
     }
-    p.x /= n
-    p.z /= n
-    return block.position.plus(p)
+    p.x /= n;
+    p.z /= n;
+    return block.position.plus(p);
   }
 
   /**
    * Stop the bot's movement and recenter to the center off the block when the bot's hitbox is partially beyond the
    * current blocks dimensions.
    */
-  function fullStop () {
-    bot.clearControlStates()
+  function fullStop() {
+    bot.clearControlStates();
 
     // Force horizontal velocity to 0 (otherwise inertia can move us too far)
     // Kind of cheaty, but the server will not tell the difference
-    bot.entity.velocity.x = 0
-    bot.entity.velocity.z = 0
+    bot.entity.velocity.x = 0;
+    bot.entity.velocity.z = 0;
 
-    const blockX = Math.floor(bot.entity.position.x) + 0.5
-    const blockZ = Math.floor(bot.entity.position.z) + 0.5
+    const blockX = Math.floor(bot.entity.position.x) + 0.5;
+    const blockZ = Math.floor(bot.entity.position.z) + 0.5;
 
     // Make sure our bounding box don't collide with neighboring blocks
     // otherwise recenter the position
-    if (Math.abs(bot.entity.position.x - blockX) > 0.2) { bot.entity.position.x = blockX }
-    if (Math.abs(bot.entity.position.z - blockZ) > 0.2) { bot.entity.position.z = blockZ }
+    if (Math.abs(bot.entity.position.x - blockX) > 0.2) {
+      bot.entity.position.x = blockX;
+    }
+    if (Math.abs(bot.entity.position.z - blockZ) > 0.2) {
+      bot.entity.position.z = blockZ;
+    }
   }
 
   function moveToEdge(refBlock, edge) {
@@ -370,10 +567,8 @@ function inject (bot) {
       ) > 0.4
     ) {
       const lookStart = performance.now();
-      bot.lookAtSmooth(
-        bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z),
-        LOOK_SPEED,
-        allowInstantTurn
+      lookSmoother.lookAt(
+        bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z)
       );
       console.log(
         `[lookAtSmooth] moveToEdge (scaffolding positioning) took ${(
@@ -393,13 +588,8 @@ function inject (bot) {
     const minDistanceSq = 0.2 * 0.2;
     const targetPos = pos.clone().offset(0.5, 0, 0.5);
     if (bot.entity.position.distanceSquared(targetPos) > minDistanceSq) {
-      const lookStart = performance.now();
-      bot.lookAtSmooth(targetPos, LOOK_SPEED);
-      console.log(
-        `[lookAtSmooth] moveToBlock (precise positioning) took ${(
-          performance.now() - lookStart
-        ).toFixed(1)}ms`
-      );
+      lookSmoother.lookAt(targetPos);
+
       bot.setControlState("forward", true);
       return false;
     }
@@ -451,13 +641,7 @@ function inject (bot) {
     ) {
       const target = stateGoal.entity;
       if (physics.canStraightLine([target.position])) {
-        const lookStart = performance.now();
-        bot.lookAtSmooth(target.position.offset(0, 1.6, 0), LOOK_SPEED);
-        console.log(
-          `[lookAtSmooth] monitorMovement (entity following) took ${(
-            performance.now() - lookStart
-          ).toFixed(1)}ms`
-        );
+        lookSmoother.lookAt(target.position.offset(0, 1.6, 0));
 
         if (
           target.position.distanceSquared(bot.entity.position) >
@@ -682,13 +866,8 @@ function inject (bot) {
       dz = nextPoint.z - p.z;
     }
 
-    const lookStart = performance.now();
-    bot.lookSmooth(Math.atan2(-dx, -dz), 0, LOOK_SPEED);
-    console.log(
-      `[lookSmooth] movement direction took ${(
-        performance.now() - lookStart
-      ).toFixed(1)}ms`
-    );
+    lookSmoother.setTargetYawPitch(Math.atan2(-dx, -dz), 0 /* pitch */);
+
     bot.setControlState("forward", true);
     bot.setControlState("jump", false);
 
