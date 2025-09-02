@@ -11,7 +11,7 @@ const Vec3 = require('vec3').Vec3
 const Physics = require('./lib/physics')
 const nbt = require('prismarine-nbt')
 const interactableBlocks = require('./lib/interactable.json')
-
+const LOOK_SPEED = 0.04;
 function inject (bot) {
   const waterType = bot.registry.blocksByName.water.id
   const ladderId = bot.registry.blocksByName.ladder.id
@@ -347,28 +347,36 @@ function inject (bot) {
   function moveToEdge (refBlock, edge) {
     // If allowed turn instantly should maybe be a bot option
     const allowInstantTurn = false
-    function getViewVector (pitch, yaw) {
-      const csPitch = Math.cos(pitch)
-      const snPitch = Math.sin(pitch)
-      const csYaw = Math.cos(yaw)
-      const snYaw = Math.sin(yaw)
-      return new Vec3(-snYaw * csPitch, snPitch, -csYaw * csPitch)
+    function getViewVector(pitch, yaw) {
+      const csPitch = Math.cos(pitch);
+      const snPitch = Math.sin(pitch);
+      const csYaw = Math.cos(yaw);
+      const snYaw = Math.sin(yaw);
+      return new Vec3(-snYaw * csPitch, snPitch, -csYaw * csPitch);
     }
     // Target viewing direction while approaching edge
     // The Bot approaches the edge while looking in the opposite direction from where it needs to go
     // The target Pitch angle is roughly the angle the bot has to look down for when it is in the position
     // to place the next block
-    const targetBlockPos = refBlock.offset(edge.x + 0.5, edge.y, edge.z + 0.5)
-    const targetPosDelta = bot.entity.position.clone().subtract(targetBlockPos)
-    const targetYaw = Math.atan2(-targetPosDelta.x, -targetPosDelta.z)
-    const targetPitch = -1.421
-    const viewVector = getViewVector(targetPitch, targetYaw)
+    const targetBlockPos = refBlock.offset(edge.x + 0.5, edge.y, edge.z + 0.5);
+    const targetPosDelta = bot.entity.position.clone().subtract(targetBlockPos);
+    const targetYaw = Math.atan2(-targetPosDelta.x, -targetPosDelta.z);
+    const targetPitch = -1.421;
+    const viewVector = getViewVector(targetPitch, targetYaw);
     // While the bot is not in the right position rotate the view and press back while crouching
-    if (bot.entity.position.distanceTo(refBlock.clone().offset(edge.x + 0.5, 1, edge.z + 0.5)) > 0.4) {
-      bot.lookAt(bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z), allowInstantTurn)
-      bot.setControlState('sneak', true)
-      bot.setControlState('back', true)
-      return false
+    if (
+      bot.entity.position.distanceTo(
+        refBlock.clone().offset(edge.x + 0.5, 1, edge.z + 0.5)
+      ) > 0.4
+    ) {
+      bot.lookAtSmooth(
+        bot.entity.position.offset(viewVector.x, viewVector.y, viewVector.z),
+        LOOK_SPEED,
+        allowInstantTurn
+      );
+      bot.setControlState("sneak", true);
+      bot.setControlState("back", true);
+      return false;
     }
     bot.setControlState('back', false)
     return true
@@ -379,7 +387,7 @@ function inject (bot) {
     const minDistanceSq = 0.2 * 0.2
     const targetPos = pos.clone().offset(0.5, 0, 0.5)
     if (bot.entity.position.distanceSquared(targetPos) > minDistanceSq) {
-      bot.lookAt(targetPos)
+      bot.lookAtSmooth(targetPos, LOOK_SPEED);
       bot.setControlState('forward', true)
       return false
     }
@@ -421,7 +429,7 @@ function inject (bot) {
     if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
       const target = stateGoal.entity
       if (physics.canStraightLine([target.position])) {
-        bot.lookAt(target.position.offset(0, 1.6, 0))
+        bot.lookAtSmooth(target.position.offset(0, 1.6, 0), LOOK_SPEED);
 
         if (target.position.distanceSquared(bot.entity.position) > stateGoal.rangeSq) {
           bot.setControlState('forward', true)
@@ -604,7 +612,7 @@ function inject (bot) {
       dz = nextPoint.z - p.z
     }
 
-    bot.look(Math.atan2(-dx, -dz), 0)
+    bot.lookSmooth(Math.atan2(-dx, -dz), 0, LOOK_SPEED);
     bot.setControlState('forward', true)
     bot.setControlState('jump', false)
 
